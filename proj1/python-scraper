@@ -1,0 +1,160 @@
+##pip install tqdm requests pandas python-docx plotly numpy scikit-learn matplotlib openai seaborn
+
+import os
+from tqdm import tqdm
+from docx import Document
+import requests
+import json
+import pandas as pd
+import openpyxl
+
+#extract information
+def extract_text_from_docx(docx_path: str):
+    """
+    Extract text content from a Word (.docx) file.
+    """
+    doc = Document(docx_path)
+    full_text = []
+
+    # Extract text from paragraphs
+    for para in doc.paragraphs:
+        full_text.append(para.text)
+
+    # Extract text from tables
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                full_text.append(cell.text)
+
+    # Extract text from headers and footers 
+    for section in doc.sections:
+        header = section.header
+        footer = section.footer
+        for para in header.paragraphs:
+            full_text.append(para.text)
+        for para in footer.paragraphs:
+            full_text.append(para.text)
+
+    return '\n'.join(full_text).strip()
+
+# Set LLM Prompts
+system_message = """
+You are an expert in analyzing and extracting information from the job description forms written by people hiring criminology degree holders.  
+Please carefully read the provided feedback form and extract the following 7 key information. Make sure that the key names are exactly the same as 
+given below. Do not create any additional key names other than these 7. 
+Key names and their descriptions:
+1. Company name: name of the company 
+2. Location: Location of the company in Australia [output 'N/A' if not available]
+3. Salary: the lowest salary expected for this position state speceficall if its per hour or per annum[output 'N/A' if not available]
+4. Job name: what is the advertised title of the job[output 'N/A' if not available]
+5. Job overview: summarise what the job responsibilities are in one sentence or less[output 'N/A' if not available]
+6. Job key skills: list what the top 3 skills required are for this jo i.e communication, knowledge of CPTED, knowledge of public policy[output 'N/A' if not available]
+7. Qualifications: lwhat is the minimal level of qualification needed to be considered for this job[output 'N/A' if not available]
+- Very important: do not make up anything. If the information of a required field is not available, output ‘N/A’ for it.
+- Output in JSON format. The JSON should contain the above 7 keys.
+"""
+
+#Process Documents
+def process_files(directory_path: str, api_key: str, system_message: str):
+    """
+    Process all .docx files in the given directory and its subdirectories,
+    send their content to the LLM, and store the JSON responses.
+    """
+    json_outputs = []
+    docx_files = []
+
+    # Walk through the directory and its subdirectories to find .docx files
+    for root, dirs, files in os.walk(directory_path):
+        for file in files:
+            if file.endswith(".docx"):
+                docx_files.append(os.path.join(root, file))
+
+    if not docx_files:
+        print("No .docx files found in the specified directory or sub-directories.")
+        return json_outputs
+
+    # Iterate through all .docx files in the directory with a progress bar
+    for file_path in tqdm(docx_files, desc="Processing files...", unit="file"):
+        filename = os.path.basename(file_path)
+        extracted_text = extract_text_from_docx(file_path)
+        # Prepare the user message with the extracted text
+        input_message = extracted_text
+
+        # Prepare the API request payload
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": input_message}
+            ],
+            "max_tokens": 2000,
+            "temperature": 0.2
+        }
+        # Send the request to the LLM API
+        response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+
+        # Extract the JSON response
+        json_response = response.json()
+        content = json_response['choices'][0]['message']['content'].strip("```json\n").strip("```")
+        parsed_json = json.loads(content)
+
+        # Normalize the parsed JSON output
+        normalized_json = normalize_json_output(parsed_json)
+
+        # Append the normalized JSON output to the list
+        json_outputs.append(normalized_json)
+        
+
+    return json_outputs
+
+#Parse LLM Output
+
+def normalize_json_output(json_output):
+    """
+    Normalize the keys and convert list values to comma-separated strings.
+    """
+    normalized_output = {}
+    for key, value in json_output.items():
+        normalized_key = key.lower().replace(" ", "_")
+        if isinstance(value, list):
+            normalized_output[normalized_key] = ', '.join(value)
+        else:
+            normalized_output[normalized_key] = value
+    return normalized_output
+
+def save_json_to_excel(json_outputs, output_file_path: str):
+    """
+    Save the list of JSON objects to an Excel file with a SNO. column.
+    """
+    # Convert the list of JSON objects to a DataFrame
+    df = pd.DataFrame(json_outputs)
+
+    # Add a Serial Number (SNO.) column
+    df.insert(0, 'SNO.', range(1, len(df) + 1))
+
+    # Ensure all columns are consistent and save the DataFrame to an Excel file
+    df.to_excel(output_file_path, index=False)
+
+#the code to call all the above-mentioned functions is given below. Note that OpenAI’s API key is required to run this code.
+# Directory containing files
+
+
+directory_path = 'documentpath'
+
+# API key for GPT-4-mini
+api_key = 'GPT-key'
+
+# Process files and get the JSON outputs
+json_outputs = process_files(directory_path, api_key, system_message)
+
+if json_outputs:
+    # Specify the full path where you want to save the file
+    output_file_path = 'outputpath'
+    save_json_to_excel(json_outputs, output_file_path)
+    print(f"Processed data has been saved to {output_file_path}")
+else:
+    print("No .docx file found.")
